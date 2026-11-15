@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+widget.pid
+widget_error.log
+widget_ui.json
+stocks_config.json
+build/
+dist/
+*.spec
+.venv/
+venv/
