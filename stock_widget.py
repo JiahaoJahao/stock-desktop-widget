@@ -16,7 +16,7 @@ try:
 except ImportError:
     HAS_PYTZ = False
 
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QPoint
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QPoint, QEvent
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSizeGrip, QDialog, QLineEdit, QScrollArea, QMessageBox, QCompleter, QMenu,
@@ -36,12 +36,21 @@ CONFIG_FILE = os.path.join(APP_DIR, "stocks_config.json")
 UI_FILE = os.path.join(APP_DIR, "widget_ui.json")
 RUN_VBS = os.path.join(APP_DIR, "run_stock.vbs")
 AUTOSTART_NAME = "StockDesktopWidget"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
+MIN_W = 280
+MIN_H = 120
+RESIZE_MARGIN = 8
+# edge flags for frameless resize
+EDGE_LEFT = 1
+EDGE_RIGHT = 2
+EDGE_TOP = 4
+EDGE_BOTTOM = 8
 
 DEFAULT_UI = {
     "x": 1560,
     "y": -1075,
     "width": 480,
+    "height": 360,
     "screen_name": r"\\.\DISPLAY1",
     "rel_x": 1433,
     "rel_y": 5,
@@ -850,6 +859,10 @@ class MainWidget(QWidget):
         self.last_data = []
         self._ready_to_save = False
         self._dragging = False
+        self._resizing = False
+        self._resize_edges = 0
+        self._resize_start_geo = None
+        self._resize_start_global = QPoint()
         self._press_global = QPoint()
         self._press_offset = QPoint()
         self._press_row = None
@@ -880,7 +893,11 @@ class MainWidget(QWidget):
     def initUI(self):
         self.setWindowTitle("美股挂件")
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.resize(int(self.ui.get("width", 480)), 300)
+        self.setMouseTracking(True)
+        self.setMinimumSize(MIN_W, MIN_H)
+        init_w = max(MIN_W, int(self.ui.get("width", 480)))
+        init_h = max(MIN_H, int(self.ui.get("height") or self._content_height()))
+        self.resize(init_w, init_h)
         self.setStyleSheet("""
             QWidget { font-family: 'Microsoft YaHei UI'; color: #FFFFFF; }
             QWidget#MainContainer {
@@ -892,11 +909,20 @@ class MainWidget(QWidget):
             QLabel#HintLabel { font-size:13px; color:#FFFFFF; font-weight:700; }
             QMenu { background:#1C1C22; color:#FFFFFF; border:1px solid #444; }
             QMenu::item:selected { background:#3A3A44; }
+            QScrollArea { background: transparent; border: none; }
+            QScrollBar:vertical {
+                background: transparent; width: 8px; margin: 2px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(255,255,255,0.25); border-radius: 4px; min-height: 24px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
         """)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         container = QWidget()
         container.setObjectName("MainContainer")
+        container.setMouseTracking(True)
         layout = QVBoxLayout(container)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(8)
@@ -943,22 +969,36 @@ class MainWidget(QWidget):
         layout.addLayout(cols)
 
         self.rows_widget = QWidget()
+        self.rows_widget.setMouseTracking(True)
         self.rows_layout = QVBoxLayout(self.rows_widget)
         self.rows_layout.setContentsMargins(0, 0, 0, 0)
         self.rows_layout.setSpacing(6)
-        layout.addWidget(self.rows_widget)
+        self.rows_layout.addStretch(1)
+        self.rows_scroll = QScrollArea()
+        self.rows_scroll.setWidgetResizable(True)
+        self.rows_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.rows_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.rows_scroll.setFrameShape(QFrame.NoFrame)
+        self.rows_scroll.setWidget(self.rows_widget)
+        self.rows_scroll.setMouseTracking(True)
+        layout.addWidget(self.rows_scroll, 1)
         self.rows = {}
         self.render_rows()
 
         footer = QHBoxLayout()
-        self.footer_label = QLabel("单击看行情 · 滚轮调透明度")
+        self.footer_label = QLabel("拖边角缩放 · 滚轮调透明度")
         self.footer_label.setStyleSheet("color:#C8C8D0; font-size:11px;")
         footer.addWidget(self.footer_label)
         footer.addStretch()
         grip = QSizeGrip(self)
+        grip.setToolTip("拖动调整大小")
         footer.addWidget(grip, 0, Qt.AlignRight | Qt.AlignBottom)
         layout.addLayout(footer)
         outer.addWidget(container)
+        self._chrome = container
+        container.installEventFilter(self)
+        self.rows_scroll.viewport().installEventFilter(self)
+        self.rows_widget.installEventFilter(self)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.open_context_menu)
 
@@ -1021,8 +1061,9 @@ class MainWidget(QWidget):
         return QGuiApplication.primaryScreen()
 
     def _resolve_geometry(self):
-        width = max(380, int(self.ui.get("width", 480)))
-        height = max(140, self._content_height())
+        width = max(MIN_W, int(self.ui.get("width", 480)))
+        saved_h = self.ui.get("height")
+        height = max(MIN_H, int(saved_h) if saved_h else self._content_height())
         screen = self._pick_screen()
         geo = screen.geometry() if screen else QGuiApplication.primaryScreen().geometry()
         rel_x, rel_y = self.ui.get("rel_x"), self.ui.get("rel_y")
@@ -1034,18 +1075,21 @@ class MainWidget(QWidget):
             y = geo.y() + int(rel_y)
         x = min(max(x, geo.x() - 40), geo.x() + geo.width() - 80)
         y = min(max(y, geo.y() - 40), geo.y() + geo.height() - 80)
-        max_w = max(380, geo.x() + geo.width() - x - 8)
+        max_w = max(MIN_W, geo.x() + geo.width() - x - 8)
+        max_h = max(MIN_H, geo.y() + geo.height() - y - 8)
         width = min(width, max_w)
+        height = min(height, max_h)
         return {"x": int(x), "y": int(y), "w": width, "h": height}
 
     def apply_saved_geometry(self):
         target = self._target or self._resolve_geometry()
-        target["h"] = max(140, self._content_height())
         screen = self._pick_screen()
         geo = screen.geometry() if screen else QGuiApplication.primaryScreen().geometry()
-        max_w = max(380, geo.x() + geo.width() - target["x"] - 8)
-        target["w"] = min(target["w"], max_w)
-        self.setMaximumWidth(max_w)
+        max_w = max(MIN_W, geo.x() + geo.width() - target["x"] - 8)
+        max_h = max(MIN_H, geo.y() + geo.height() - target["y"] - 8)
+        target["w"] = min(max(MIN_W, target["w"]), max_w)
+        target["h"] = min(max(MIN_H, target["h"]), max_h)
+        self.setMinimumSize(MIN_W, MIN_H)
         self.resize(target["w"], target["h"])
         self.move(target["x"], target["y"])
         native_set_pos(
@@ -1078,32 +1122,43 @@ class MainWidget(QWidget):
         self.ui["screen_name"] = screen.name()
         self.ui["rel_x"] = int(self.x() - geo.x())
         self.ui["rel_y"] = int(self.y() - geo.y())
-        max_w = max(380, geo.width() - self.ui["rel_x"] - 8)
-        self.ui["width"] = min(int(self.width()), max_w)
+        max_w = max(MIN_W, geo.width() - self.ui["rel_x"] - 8)
+        max_h = max(MIN_H, geo.height() - self.ui["rel_y"] - 8)
+        self.ui["width"] = min(max(MIN_W, int(self.width())), max_w)
+        self.ui["height"] = min(max(MIN_H, int(self.height())), max_h)
         save_ui(self.ui)
         self._target = {
             "x": self.ui["x"], "y": self.ui["y"],
-            "w": self.ui["width"], "h": int(self.height()),
+            "w": self.ui["width"], "h": self.ui["height"],
         }
 
     def render_rows(self):
-        for i in reversed(range(self.rows_layout.count())):
-            widget = self.rows_layout.itemAt(i).widget()
+        while self.rows_layout.count():
+            item = self.rows_layout.takeAt(0)
+            widget = item.widget()
             if widget:
                 widget.setParent(None)
                 widget.deleteLater()
         self.rows.clear()
         for stock in self.current_stocks:
             row = StockRow(stock)
+            row.setMouseTracking(True)
+            row.installEventFilter(self)
             row.remove_requested.connect(self.remove_ticker)
             self.rows[stock["ticker"]] = row
             self.rows_layout.addWidget(row)
-        height = max(140, self._content_height())
-        width = max(380, int(self.ui.get("width", self.width() or 480)))
-        self.resize(width, height)
+        self.rows_layout.addStretch(1)
+        # Keep user-chosen size; only seed height if never saved
+        width = max(MIN_W, int(self.ui.get("width", self.width() or 480)))
+        if self.ui.get("height"):
+            height = max(MIN_H, int(self.ui["height"]))
+        else:
+            height = max(MIN_H, self._content_height())
+        if self.width() < MIN_W or self.height() < MIN_H:
+            self.resize(width, height)
         if self._target:
-            self._target["w"] = width
-            self._target["h"] = height
+            self._target["w"] = max(MIN_W, int(self.width() or width))
+            self._target["h"] = max(MIN_H, int(self.height() or height))
 
     def remove_ticker(self, ticker):
         self.current_stocks = [s for s in self.current_stocks if s["ticker"] != ticker]
@@ -1172,13 +1227,59 @@ class MainWidget(QWidget):
     def snap_top_right(self):
         screen = QGuiApplication.screenAt(QCursor.pos()) or self._pick_screen()
         geo = screen.availableGeometry()
-        width, height = max(380, self.width()), max(140, self.height())
+        width, height = max(MIN_W, self.width()), max(MIN_H, self.height())
         x = geo.x() + geo.width() - width - 12
         y = geo.y() + 8
         self._target = {"x": x, "y": y, "w": width, "h": height}
         self.apply_saved_geometry()
         self._ready_to_save = True
         self.persist_geometry(force=True)
+
+    def _hit_resize_edges(self, pos):
+        edges = 0
+        x, y = pos.x(), pos.y()
+        w, h = self.width(), self.height()
+        if x <= RESIZE_MARGIN:
+            edges |= EDGE_LEFT
+        elif x >= w - RESIZE_MARGIN:
+            edges |= EDGE_RIGHT
+        if y <= RESIZE_MARGIN:
+            edges |= EDGE_TOP
+        elif y >= h - RESIZE_MARGIN:
+            edges |= EDGE_BOTTOM
+        return edges
+
+    def _cursor_for_edges(self, edges):
+        if edges in (EDGE_LEFT | EDGE_TOP, EDGE_RIGHT | EDGE_BOTTOM):
+            return Qt.SizeFDiagCursor
+        if edges in (EDGE_RIGHT | EDGE_TOP, EDGE_LEFT | EDGE_BOTTOM):
+            return Qt.SizeBDiagCursor
+        if edges in (EDGE_LEFT, EDGE_RIGHT):
+            return Qt.SizeHorCursor
+        if edges in (EDGE_TOP, EDGE_BOTTOM):
+            return Qt.SizeVerCursor
+        return Qt.ArrowCursor
+
+    def _apply_resize(self, global_pos):
+        if not self._resize_start_geo or not self._resize_edges:
+            return
+        dx = global_pos.x() - self._resize_start_global.x()
+        dy = global_pos.y() - self._resize_start_global.y()
+        geo = self._resize_start_geo
+        x, y, w, h = geo.x(), geo.y(), geo.width(), geo.height()
+        if self._resize_edges & EDGE_LEFT:
+            new_w = max(MIN_W, w - dx)
+            x = x + (w - new_w)
+            w = new_w
+        if self._resize_edges & EDGE_RIGHT:
+            w = max(MIN_W, w + dx)
+        if self._resize_edges & EDGE_TOP:
+            new_h = max(MIN_H, h - dy)
+            y = y + (h - new_h)
+            h = new_h
+        if self._resize_edges & EDGE_BOTTOM:
+            h = max(MIN_H, h + dy)
+        self.setGeometry(x, y, w, h)
 
     def fetch_data(self):
         self._tick_header()
@@ -1198,7 +1299,7 @@ class MainWidget(QWidget):
             return
         if ok:
             self.last_data = data_list
-            self.footer_label.setText("单击看行情 · 滚轮调透明度")
+            self.footer_label.setText("拖边角缩放 · 滚轮调透明度")
         else:
             self.footer_label.setText("刷新失败，仍显示上次价格")
             data_list = self.last_data or data_list
@@ -1229,36 +1330,99 @@ class MainWidget(QWidget):
             child = child.parentWidget()
         return None
 
+    def _pos_in_self(self, event):
+        return self.mapFromGlobal(event.globalPos())
+
+    def eventFilter(self, obj, event):
+        et = event.type()
+        if et in (QEvent.MouseMove, QEvent.MouseButtonPress, QEvent.MouseButtonRelease):
+            if not hasattr(event, "globalPos"):
+                return super().eventFilter(obj, event)
+            local = self._pos_in_self(event)
+            if et == QEvent.MouseMove:
+                if self._resizing and (event.buttons() & Qt.LeftButton):
+                    self._apply_resize(event.globalPos())
+                    return True
+                if (event.buttons() & Qt.LeftButton) and (self._dragging or self._press_global is not None):
+                    # Let normal handlers on self manage drag if started there;
+                    # still update cursor when idle over edges through children.
+                    pass
+                if not (event.buttons() & Qt.LeftButton):
+                    edges = self._hit_resize_edges(local)
+                    self.setCursor(self._cursor_for_edges(edges))
+                    if edges:
+                        return False
+            elif et == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                edges = self._hit_resize_edges(local)
+                if edges:
+                    self._resizing = True
+                    self._dragging = False
+                    self._press_row = None
+                    self._resize_edges = edges
+                    self._resize_start_geo = self.geometry()
+                    self._resize_start_global = event.globalPos()
+                    self._press_global = event.globalPos()
+                    return True
+            elif et == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                if self._resizing:
+                    self._resizing = False
+                    self._resize_edges = 0
+                    self.persist_geometry(force=True)
+                    self.setCursor(self._cursor_for_edges(self._hit_resize_edges(local)))
+                    return True
+        return super().eventFilter(obj, event)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
+            edges = self._hit_resize_edges(event.pos())
             self._dragging = False
+            self._resizing = False
             self._press_global = event.globalPos()
             self._press_offset = event.globalPos() - self.frameGeometry().topLeft()
-            self._press_row = self._row_at(event.pos())
+            self._press_row = None
+            if edges:
+                self._resizing = True
+                self._resize_edges = edges
+                self._resize_start_geo = self.geometry()
+                self._resize_start_global = event.globalPos()
+            else:
+                self._press_row = self._row_at(event.pos())
             event.accept()
             return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self._resizing and (event.buttons() & Qt.LeftButton):
+            self._apply_resize(event.globalPos())
+            event.accept()
+            return
         if event.buttons() & Qt.LeftButton:
             moved = (event.globalPos() - self._press_global).manhattanLength()
             if moved >= 6:
                 self._dragging = True
+                self._press_row = None
                 if not self.ui.get("position_locked", False):
                     self.move(event.globalPos() - self._press_offset)
             event.accept()
             return
+        edges = self._hit_resize_edges(event.pos())
+        self.setCursor(self._cursor_for_edges(edges))
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
-            if self._dragging:
+            if self._resizing:
+                self._resizing = False
+                self._resize_edges = 0
+                self.persist_geometry(force=True)
+            elif self._dragging:
                 if not self.ui.get("position_locked", False):
                     self.persist_geometry(force=True)
             elif self._press_row:
                 webbrowser.open(f"https://finance.yahoo.com/quote/{self._press_row.ticker}")
             self._dragging = False
             self._press_row = None
+            self.setCursor(self._cursor_for_edges(self._hit_resize_edges(event.pos())))
             event.accept()
             return
         super().mouseReleaseEvent(event)
