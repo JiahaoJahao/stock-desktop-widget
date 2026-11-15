@@ -4,8 +4,13 @@ widget.pid
 widget_error.log
 widget_ui.json
 stocks_config.json
+logos/
 build/
 dist/
 *.spec
+*.exe
 .venv/
 venv/
+_make_icon.py
+stock-widget-*.jpg
+preview-*.png

@@ -6,13 +6,16 @@ Windows 桌面悬浮看盘工具：美股 / 加密货币自选、盘前盘中盘
 
 到 [Releases](https://github.com/JiahaoJahao/stock-desktop-widget/releases) 下载 `StockWidget.exe`，双击即可运行（无需安装 Python）。
 
+> Windows 可能对**未签名**的 exe 弹出 SmartScreen 提示（常见于 PyInstaller 打包），点「仍要运行」即可。源码开源可审计，不含恶意行为。
+
 ## 功能
 
-- 自选美股 / ETF / 加密货币（Yahoo Finance）
+- 自选美股 / ETF / 加密货币（Yahoo Finance），行内显示公司 logo
 - 盘前 / 开盘 / 盘后状态与倒计时
+- 拖拽股票行调整顺序；拖边角缩放，位置与大小自动记住
 - 本地时间：默认跟随系统时区，也可在设置里指定
-- 默认透明度 70%，滚轮可调；位置与宽度自动记住
-- 开机自启、始终置顶、锁定位置
+- 默认透明度 95%；开机自启、始终置顶、锁定位置
+- 桌面快捷方式 + 应用图标
 
 ## 源码运行
 
