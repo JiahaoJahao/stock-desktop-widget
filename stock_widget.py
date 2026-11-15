@@ -56,7 +56,7 @@ DEFAULT_UI = {
     "rel_y": 5,
     "always_on_top": True,
     "position_locked": False,
-    "opacity": 0.7,
+    "opacity": 0.95,
     "alert_pct": 4.0,
     "local_tz": "auto",
 }
@@ -558,13 +558,13 @@ class StockRow(QFrame):
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet("""
             QFrame#StockRow {
-                background: rgba(255,255,255,0.08);
-                border: 1px solid rgba(255,255,255,0.14);
+                background: rgba(28, 28, 34, 0.96);
+                border: 1px solid rgba(255,255,255,0.16);
                 border-radius: 10px;
             }
             QFrame#StockRow:hover {
-                background: rgba(255,255,255,0.13);
-                border: 1px solid rgba(255,255,255,0.22);
+                background: rgba(40, 40, 48, 0.98);
+                border: 1px solid rgba(255,255,255,0.28);
             }
         """)
         self._build()
@@ -623,13 +623,13 @@ class StockRow(QFrame):
     def _reset_style(self):
         self.setStyleSheet("""
             QFrame#StockRow {
-                background: rgba(255,255,255,0.08);
-                border: 1px solid rgba(255,255,255,0.14);
+                background: rgba(28, 28, 34, 0.96);
+                border: 1px solid rgba(255,255,255,0.16);
                 border-radius: 10px;
             }
             QFrame#StockRow:hover {
-                background: rgba(255,255,255,0.13);
-                border: 1px solid rgba(255,255,255,0.22);
+                background: rgba(40, 40, 48, 0.98);
+                border: 1px solid rgba(255,255,255,0.28);
             }
         """)
 
@@ -725,8 +725,8 @@ class SettingsDialog(QDialog):
         op_row = QHBoxLayout()
         op_row.addWidget(QLabel("透明度"))
         self.opacity = QSlider(Qt.Horizontal)
-        self.opacity.setRange(40, 100)
-        self.opacity.setValue(int(round(float(ui.get("opacity", 0.7)) * 100)))
+        self.opacity.setRange(75, 100)
+        self.opacity.setValue(int(round(float(ui.get("opacity", 0.95)) * 100)))
         self.op_val = QLabel(f"{self.opacity.value()}%")
         self.opacity.valueChanged.connect(lambda v: self.op_val.setText(f"{v}%"))
         op_row.addWidget(self.opacity, 1)
@@ -871,7 +871,13 @@ class MainWidget(QWidget):
         self.initUI()
         self._target = self._resolve_geometry()
         self.apply_window_flags()
-        self.setWindowOpacity(float(self.ui.get("opacity", 1.0)))
+        # Never start too transparent — hard to read on busy wallpapers
+        start_opacity = float(self.ui.get("opacity", 0.95))
+        if start_opacity < 0.75:
+            start_opacity = 0.95
+            self.ui["opacity"] = start_opacity
+            save_ui(self.ui)
+        self.setWindowOpacity(start_opacity)
 
         self.thread = StockFetchThread()
         self.thread.set_stocks(self.current_stocks)
@@ -901,20 +907,26 @@ class MainWidget(QWidget):
         self.setStyleSheet("""
             QWidget { font-family: 'Microsoft YaHei UI'; color: #FFFFFF; }
             QWidget#MainContainer {
-                background-color: rgb(18, 18, 22);
+                background-color: rgb(10, 10, 14);
                 border-radius: 16px;
-                border: 1px solid rgba(255,255,255,0.20);
+                border: 1px solid rgba(255,255,255,0.22);
             }
             QLabel { color: #FFFFFF; }
             QLabel#HintLabel { font-size:13px; color:#FFFFFF; font-weight:700; }
             QMenu { background:#1C1C22; color:#FFFFFF; border:1px solid #444; }
             QMenu::item:selected { background:#3A3A44; }
-            QScrollArea { background: transparent; border: none; }
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea > QWidget > QWidget {
+                background: transparent;
+            }
             QScrollBar:vertical {
                 background: transparent; width: 8px; margin: 2px;
             }
             QScrollBar::handle:vertical {
-                background: rgba(255,255,255,0.25); border-radius: 4px; min-height: 24px;
+                background: rgba(255,255,255,0.28); border-radius: 4px; min-height: 24px;
             }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
         """)
@@ -970,6 +982,8 @@ class MainWidget(QWidget):
 
         self.rows_widget = QWidget()
         self.rows_widget.setMouseTracking(True)
+        self.rows_widget.setAttribute(Qt.WA_StyledBackground, True)
+        self.rows_widget.setStyleSheet("background: transparent;")
         self.rows_layout = QVBoxLayout(self.rows_widget)
         self.rows_layout.setContentsMargins(0, 0, 0, 0)
         self.rows_layout.setSpacing(6)
@@ -979,6 +993,10 @@ class MainWidget(QWidget):
         self.rows_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.rows_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.rows_scroll.setFrameShape(QFrame.NoFrame)
+        self.rows_scroll.setAttribute(Qt.WA_StyledBackground, True)
+        self.rows_scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
+        self.rows_scroll.viewport().setAttribute(Qt.WA_StyledBackground, True)
+        self.rows_scroll.viewport().setStyleSheet("background: transparent;")
         self.rows_scroll.setWidget(self.rows_widget)
         self.rows_scroll.setMouseTracking(True)
         layout.addWidget(self.rows_scroll, 1)
@@ -1177,7 +1195,7 @@ class MainWidget(QWidget):
             self.ui.update(dialog.result_ui())
             self.ui.pop("compact", None)
             save_ui(self.ui)
-            self.setWindowOpacity(float(self.ui.get("opacity", 1.0)))
+            self.setWindowOpacity(float(self.ui.get("opacity", 0.95)))
             self.render_rows()
             self.thread.set_stocks(self.current_stocks)
             self.apply_saved_geometry()
@@ -1429,7 +1447,7 @@ class MainWidget(QWidget):
 
     def wheelEvent(self, event):
         step = 0.04 if event.angleDelta().y() > 0 else -0.04
-        opacity = min(1.0, max(0.40, self.windowOpacity() + step))
+        opacity = min(1.0, max(0.75, self.windowOpacity() + step))
         self.setWindowOpacity(opacity)
         self.ui["opacity"] = round(opacity, 2)
         save_ui(self.ui)
